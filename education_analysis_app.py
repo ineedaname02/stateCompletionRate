@@ -819,7 +819,7 @@ elif page == "⏱ 6 · DTW Time-Series Clustering":
                 ), row=1, col=c_id + 1)
             fig_ts.add_trace(go.Scatter(
                 x=YEARS_TS, y=centroid, mode="lines",
-                line=dict(color="black", width=2.5, dash="dash"),
+                line=dict(color="#FFFFFF", width=2.5, dash="dash"),
                 name=f"Centroid {c_id}", legendgroup=f"c{c_id}"
             ), row=1, col=c_id + 1)
         fig_ts.update_layout(height=420, template="plotly_white",
