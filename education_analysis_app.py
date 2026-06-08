@@ -453,34 +453,71 @@ elif page == "📊 3 · EDA":
         else:
             st.info("Select at least 2 features.")
 
-    # ── Tab 4: Scatter ────────────────────────────────────────────────────────
+    # ── Tab 4: Scatter (1 variable → 3 stages side by side) ──────────────────────
     with tabs[3]:
-        st.subheader("Scatter: Completion vs Predictor")
+        st.subheader("Completion Rate vs Economic Pressure Indicators")
         from scipy import stats as scipy_stats
+        import matplotlib.pyplot as plt
+        import io
 
-        x_opts = [c for c in [
-            "poverty_absolute", "poverty_relative", "avg_hh_size", "income_median",
-            "tfr_tfr", "str_primary", "str_secondary", "education_pressure_primary",
-            "urban_pressure_proxy"
-        ] if c in master.columns]
-        y_opts = [T_PRI, T_LOW, T_UPP]
+        PRESSURE_VARS_EDA = [c for c in [
+            'poverty_absolute', 'poverty_relative', 'avg_hh_size',
+            'income_median', 'tfr_tfr',
+            'education_pressure_primary', 'education_pressure_secondary',
+            'urban_pressure_proxy'
+        ] if c in master.columns and master[c].notna().sum() > 15]
 
-        col1, col2 = st.columns(2)
-        x_var = col1.selectbox("X (predictor)", x_opts)
-        y_var = col2.selectbox("Y (target)", y_opts)
+        TARGETS_EDA = [
+            (T_PRI, 'Primary Completion'),
+            (T_LOW, 'Lower Secondary Completion'),
+            (T_UPP, 'Upper Secondary Completion'),
+        ]
 
-        sub = master[[x_var, y_var, "state", "year"]].dropna()
-        if len(sub) > 4:
-            sl, ic, r, p, _ = scipy_stats.linregress(sub[x_var], sub[y_var])
-            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
-            fig4 = px.scatter(sub, x=x_var, y=y_var, color="state", hover_data=["year"],
-                              title=f"{y_var} vs {x_var}  (r={r:.2f} {sig})",
-                              template="plotly_white", height=480,
-                              trendline="ols")
-            st.plotly_chart(fig4, use_container_width=True)
-            st.caption(f"r = {r:.3f}  |  p = {p:.4f}  |  slope = {sl:.3f}")
+        if not PRESSURE_VARS_EDA:
+            st.warning("No pressure variables found in master.")
         else:
-            st.warning("Not enough data.")
+            selected_var = st.selectbox(
+                "Select predictor variable", 
+                PRESSURE_VARS_EDA,
+                key="scatter_var_sel"
+            )
+
+            col_idx = PRESSURE_VARS_EDA.index(selected_var)
+            dot_color = PALETTE[col_idx % len(PALETTE)]
+
+            cols = st.columns(3)
+
+            for col_widget, (target, title) in zip(cols, TARGETS_EDA):
+                sub = master[[selected_var, target, 'state']].dropna()
+
+                fig, ax = plt.subplots(figsize=(4.5, 4))
+
+                ax.scatter(sub[selected_var], sub[target],
+                        color=dot_color, alpha=0.5, s=30)
+
+                if len(sub) > 2:
+                    sl, ic, r, p, _ = scipy_stats.linregress(sub[selected_var], sub[target])
+                    xr = np.linspace(sub[selected_var].min(), sub[selected_var].max(), 50)
+                    ax.plot(xr, sl * xr + ic, 'r--', lw=1.3, alpha=0.7)
+                    sig = '***' if p < 0.001 else ('**' if p < 0.01 else ('*' if p < 0.05 else 'ns'))
+                    r_label = f'r={r:.2f} {sig}'
+                else:
+                    r_label = 'n/a'
+
+                ax.set_title(r_label, fontsize=9)
+                ax.set_xlabel(selected_var, fontsize=8)
+                ax.set_ylabel('Completion (%)', fontsize=8)
+                ax.tick_params(labelsize=7)
+                ax.grid(alpha=0.25)
+                plt.tight_layout()
+
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', dpi=130, bbox_inches='tight')
+                buf.seek(0)
+                plt.close(fig)
+
+                col_widget.subheader(title)
+                col_widget.image(buf, use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE 4 — K-MEANS
