@@ -1033,56 +1033,51 @@ else:
             interp_bz = st.checkbox("Interpolate remaining sparse columns before dropping", value=False)
             st.caption("Tip: try interpolate first, then drop — this fills sparse WB columns before checking for gaps.")
 
+        # Define a path for the master CSV (adjust as needed)
+        MASTER_BZ_PATH = "brazil_master_2000plus.csv"
+
         if st.button("▶ Load brazil_final_combined.csv", type="primary"):
             try:
                 df = pd.read_csv(BZ_CSV_PATH, index_col="Year")
                 df.index = df.index.astype(int)
                 df.index.name = "Year"
 
-                st.subheader("Before cleaning")
-                c1, c2 = st.columns(2)
-                c1.metric("Years loaded", len(df))
-                miss_before = df.isnull().sum()
-                miss_before = miss_before[miss_before > 0]
-                if len(miss_before):
-                    c2.metric("Columns with NaN", len(miss_before))
-                    st.write("Missing values per column (before):")
-                    st.dataframe(miss_before.rename("NaN count").reset_index(), use_container_width=True)
+                # Step 1: Drop years before 2000
+                original_len = len(df)
+                df = df[df.index >= 2000]
+                st.info(f"Dropped {original_len - len(df)} year(s) before 2000. Kept {len(df)} rows (≥2000).")
+
+                # Step 2: Interpolate missing values (for years ≥2000)
+                cols_with_nan = [c for c in df.columns if df[c].isna().any()]
+                if cols_with_nan:
+                    df[cols_with_nan] = df[cols_with_nan].interpolate(
+                        method="linear", limit_direction="both"
+                    )
+                    st.info(f"Interpolated {len(cols_with_nan)} column(s).")
+
+                # Optional: Drop rows that still have any missing after interpolation
+                # (uncomment if you want a completely clean dataset)
+                # before_drop = len(df)
+                # df = df.dropna()
+                # st.info(f"Dropped {before_drop - len(df)} row(s) with remaining missing values.")
+
+                # Step 3: Check final missing
+                remaining_missing = df.isnull().sum()
+                remaining_missing = remaining_missing[remaining_missing > 0]
+                if len(remaining_missing) > 0:
+                    st.warning("⚠️ Still have missing values after cleaning:")
+                    st.dataframe(remaining_missing.rename("NaN count").reset_index())
                 else:
-                    c2.metric("Columns with NaN", 0)
+                    st.success("✅ No missing values remaining.")
 
-                # ── Optional: interpolate first ────────────────────────────
-                if interp_bz:
-                    sparse_bz = [c for c in df.columns if df[c].isna().sum() > 0]
-                    if sparse_bz:
-                        df[sparse_bz] = df[sparse_bz].interpolate(
-                            method="linear", limit_direction="both"
-                        )
-                        st.info(f"Interpolated {len(sparse_bz)} sparse column(s).")
-
-                # ── Drop years with missing values ─────────────────────────
-                if drop_bz_missing:
-                    before = len(df)
-                    df = df.dropna()
-                    dropped = before - len(df)
-                    if dropped > 0:
-                        st.info(f"Dropped {dropped} year(s) with missing values.")
-                    else:
-                        st.info("No years dropped — no missing values after interpolation.")
+                # ─────────────────────────────────────────────
+                # Save to master CSV (overwrites if exists)
+                df.to_csv(MASTER_BZ_PATH)
+                st.success(f"💾 Saved cleaned data to `{MASTER_BZ_PATH}`")
+                # ─────────────────────────────────────────────
 
                 st.session_state["bz_df"] = df
-                st.success(f"✅ Loaded: {df.shape[0]} years × {df.shape[1]} columns  ({df.index.min()}–{df.index.max()})")
-                st.subheader("Preview")
                 st.dataframe(df.head(10).round(4), use_container_width=True)
-
-                # Final missing check
-                miss_after = df.isnull().sum()
-                miss_after = miss_after[miss_after > 0]
-                st.subheader("Missing values after cleaning")
-                if len(miss_after):
-                    st.dataframe(miss_after.rename("NaN count").reset_index(), use_container_width=True)
-                else:
-                    st.success("No missing values.")
 
             except Exception as e:
                 st.error(f"Could not load file: {e}")
@@ -1413,14 +1408,15 @@ else:
             st.plotly_chart(fig_ts, use_container_width=True)
             st.success("✅ DTW clustering complete.")
 
-    # ── BZ-6 — UNIFIED FORECASTING ────────────────────────────────────────────
+        # ── BZ-6 — UNIFIED FORECASTING ────────────────────────────────────────────
     elif page == "🤖 BZ-6 · Supervised Models":
         st.title("🤖 BZ-6 · Unified Forecasting — Brazil")
         st.markdown("""
-> **Method:** Expanding window, 1-step ahead over **years** (Brazil is national-level, no states).  
-> **Models:** ML (Ridge / Random Forest / Gradient Boosting) + ARIMA (auto) + Holt-Winters  
-> Each year is held out once as the test point while all prior years form the training set.
-""")
+        > **Method:** Two evaluation modes:  
+        > 1. **Expanding window** – 1‑step ahead over all years (backtest).  
+        > 2. **Hold‑out forecast** – leave out last N years, train once, forecast N years ahead, compare to actual.  
+        > **Models:** ML (Ridge / RF / GBM) + ARIMA (auto) + Holt‑Winters
+        """)
         df = st.session_state.get("bz_df")
         if df is None:
             st.warning("⚠️ Load data first (BZ-1).")
@@ -1432,6 +1428,14 @@ else:
         from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
         from statsmodels.tsa.arima.model import ARIMA
         from statsmodels.tsa.holtwinters import ExponentialSmoothing
+        import plotly.graph_objects as go
+        import plotly.express as px
+        import numpy as np
+        import pandas as pd
+
+        # Colour palette (fallback if not defined globally)
+        if 'PALETTE' not in dir():
+            PALETTE = px.colors.qualitative.Set2
 
         target_opts = [c for c in BZ_COMPLETION_COLS if c in df.columns]
         sel_targets_bz = st.multiselect(
@@ -1442,205 +1446,332 @@ else:
         )
 
         all_feat_candidates = [c for c in df.columns
-                               if c not in target_opts and df[c].notna().sum() > len(df) * 0.4]
+                            if c not in target_opts and df[c].notna().sum() > len(df) * 0.4]
         default_x = [c for c in BZ_ECON_COLS if c in all_feat_candidates]
         PRED_FEATS_BZ = st.multiselect("Predictor features (exogenous)", all_feat_candidates, default=default_x)
 
         c1, c2 = st.columns(2)
         min_train_bz = c1.number_input("Min training years", value=5, min_value=3)
-        models_bz = st.multiselect(
-            "Models",
-            ["ML_Ridge", "ML_RandomForest", "ML_GradientBoosting", "ARIMA", "HoltWinters"],
-            default=["ML_Ridge", "ML_RandomForest", "ML_GradientBoosting", "ARIMA", "HoltWinters"]
+
+        # ===== Mode selection =====
+        forecast_mode = st.radio(
+            "Evaluation mode",
+            ["Expanding window CV (backtest on all years)", "Hold‑out forecast (leave out last N years)"],
+            index=0,
+            help="Expanding window: test each year one‑by‑one. Hold‑out: train once, forecast last N years."
         )
+
+        if forecast_mode == "Hold‑out forecast (leave out last N years)":
+            holdout_years = st.number_input("Number of years to leave out for testing", min_value=1, max_value=10, value=3, step=1)
+            st.info(f"Will train on all data except the last {holdout_years} years, then forecast those {holdout_years} years.")
+            # For hold‑out, only univariate models are used (no future exogenous features)
+            available_models = ["ARIMA", "HoltWinters"]
+            models_bz = st.multiselect(
+                "Models (univariate only for hold‑out)",
+                available_models,
+                default=available_models,
+                help="ML models require future exogenous values not available here."
+            )
+        else:
+            models_bz = st.multiselect(
+                "Models",
+                ["ML_Ridge", "ML_RandomForest", "ML_GradientBoosting", "ARIMA", "HoltWinters"],
+                default=["ML_Ridge", "ML_RandomForest", "ML_GradientBoosting", "ARIMA", "HoltWinters"]
+            )
 
         if st.button("▶ Run Unified Forecasting", type="primary"):
             if not sel_targets_bz:
                 st.error("Select at least 1 target.")
                 st.stop()
 
-            # Brazil: treat the single national time series like one "state"
-            # Rows indexed by year, columns are features + targets
             df_sorted = df.sort_index()
-            years_all = df_sorted.index.tolist()
 
-            def run_forecasting_bz(target_col, feat_cols, df_ts, min_tr, model_names):
-                results = []
-                MIN_TRAIN = int(min_tr)
-                ts = df_ts[target_col].dropna()
+            # ------------------------------------------------------------------
+            #  HOLD‑OUT FORECAST MODE
+            # ------------------------------------------------------------------
+            if forecast_mode == "Hold‑out forecast (leave out last N years)":
+                if len(df_sorted) <= holdout_years:
+                    st.error(f"Not enough data: need more than {holdout_years} years.")
+                    st.stop()
 
-                for i in range(MIN_TRAIN, len(ts)):
-                    train_years = ts.index[:i]
-                    test_year   = ts.index[i]
-                    y_true = ts.iloc[i]
-                    if pd.isna(y_true):
+                train_df = df_sorted.iloc[:-holdout_years]
+                test_df = df_sorted.iloc[-holdout_years:]
+                test_years = test_df.index.tolist()
+
+                results_holdout = []
+
+                for target_col in sel_targets_bz:
+                    ts_train = train_df[target_col].dropna()
+                    ts_test = test_df[target_col]
+
+                    # ARIMA
+                    if "ARIMA" in models_bz:
+                        try:
+                            from pmdarima import auto_arima
+                            am = auto_arima(ts_train, seasonal=False, stepwise=True,
+                                            suppress_warnings=True, error_action='ignore',
+                                            max_p=2, max_q=2, max_d=1)
+                            forecast = am.predict(n_periods=holdout_years)
+                            for year, pred, true in zip(test_years, forecast, ts_test):
+                                if not pd.isna(true):
+                                    results_holdout.append({
+                                        "target": target_col,
+                                        "model": "ARIMA",
+                                        "test_year": year,
+                                        "true": true,
+                                        "pred": pred
+                                    })
+                        except Exception as e:
+                            st.warning(f"ARIMA failed for {target_col}: {e}")
+
+                    # Holt‑Winters
+                    if "HoltWinters" in models_bz:
+                        try:
+                            hw = ExponentialSmoothing(ts_train, trend='add', seasonal=None).fit()
+                            forecast = hw.forecast(steps=holdout_years)
+                            for year, pred, true in zip(test_years, forecast, ts_test):
+                                if not pd.isna(true):
+                                    results_holdout.append({
+                                        "target": target_col,
+                                        "model": "HoltWinters",
+                                        "test_year": year,
+                                        "true": true,
+                                        "pred": pred
+                                    })
+                        except Exception as e:
+                            st.warning(f"Holt‑Winters failed for {target_col}: {e}")
+
+                if not results_holdout:
+                    st.error("No valid hold‑out forecasts generated.")
+                    st.stop()
+
+                full_bz = pd.DataFrame(results_holdout)
+                full_bz["target_short"] = full_bz["target"].str.replace(
+                    "UNESCO | Completion rate for ", "", regex=False).str.replace(" (%)", "", regex=False)
+
+                # Metrics on hold-out period
+                st.subheader(f"📊 Hold‑out forecast error (last {holdout_years} years)")
+                metrics_hold = []
+                for (target, model), group in full_bz.groupby(["target_short", "model"]):
+                    rmse = np.sqrt(mean_squared_error(group["true"], group["pred"]))
+                    mae = mean_absolute_error(group["true"], group["pred"])
+                    metrics_hold.append({"target": target, "model": model, "RMSE": rmse, "MAE": mae})
+                df_metrics = pd.DataFrame(metrics_hold)
+                st.dataframe(df_metrics.round(4), use_container_width=True)
+
+                # Plot for each target
+                for target_col in sel_targets_bz:
+                    label = target_col.replace("UNESCO | Completion rate for ", "").replace(" (%)", "")
+                    sub = full_bz[full_bz["target"] == target_col].sort_values("test_year")
+                    if sub.empty:
                         continue
+                    fig = go.Figure()
+                    # Full historical series (train + test)
+                    full_series = df_sorted[target_col].dropna()
+                    fig.add_trace(go.Scatter(
+                        x=full_series.index, y=full_series.values,
+                        mode="lines", name="Historical", line=dict(color="gray", width=1)))
+                    # Actual hold-out points
+                    fig.add_trace(go.Scatter(
+                        x=sub["test_year"], y=sub["true"],
+                        mode="markers", name="Actual (hold‑out)", marker=dict(color="blue", size=8)))
+                    # Forecasts per model
+                    for model in sub["model"].unique():
+                        model_sub = sub[sub["model"] == model]
+                        fig.add_trace(go.Scatter(
+                            x=model_sub["test_year"], y=model_sub["pred"],
+                            mode="lines+markers", name=f"Forecast ({model})",
+                            line=dict(dash="dot")))
+                    fig.update_layout(
+                        title=f"{label} – Hold‑out forecast vs actual",
+                        xaxis_title="Year", yaxis_title="Completion rate (%)",
+                        template="plotly_white", height=400
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
-                    train_df = df_ts.loc[train_years]
-                    test_row  = df_ts.loc[[test_year]]
+                st.success("Hold‑out forecast complete.")
+                st.session_state["bz_holdout"] = full_bz
 
-                    # ML models
-                    feats_avail = [f for f in feat_cols if f in df_ts.columns]
-                    train_ml = train_df[feats_avail + [target_col]].dropna()
-                    if len(train_ml) >= MIN_TRAIN:
-                        test_ml = test_row[feats_avail].dropna()
-                        if len(test_ml) > 0:
-                            scaler = StandardScaler()
-                            X_tr = scaler.fit_transform(train_ml[feats_avail])
-                            X_te = scaler.transform(test_ml[feats_avail])
-                            y_tr = train_ml[target_col]
-                            ml_map = {}
-                            if "ML_Ridge" in model_names:
-                                ml_map["ML_Ridge"] = Ridge(alpha=1.0)
-                            if "ML_RandomForest" in model_names:
-                                ml_map["ML_RandomForest"] = RandomForestRegressor(
-                                    n_estimators=100, max_depth=3, random_state=42)
-                            if "ML_GradientBoosting" in model_names:
-                                ml_map["ML_GradientBoosting"] = GradientBoostingRegressor(
-                                    n_estimators=50, max_depth=2, learning_rate=0.05, random_state=42)
-                            for mname, model in ml_map.items():
+            # ------------------------------------------------------------------
+            #  ORIGINAL EXPANDING WINDOW CV MODE
+            # ------------------------------------------------------------------
+            else:
+                def run_forecasting_bz(target_col, feat_cols, df_ts, min_tr, model_names):
+                    results = []
+                    MIN_TRAIN = int(min_tr)
+                    ts = df_ts[target_col].dropna()
+
+                    for i in range(MIN_TRAIN, len(ts)):
+                        train_years = ts.index[:i]
+                        test_year   = ts.index[i]
+                        y_true = ts.iloc[i]
+                        if pd.isna(y_true):
+                            continue
+
+                        train_df = df_ts.loc[train_years]
+                        test_row  = df_ts.loc[[test_year]]
+
+                        # ML models
+                        feats_avail = [f for f in feat_cols if f in df_ts.columns]
+                        train_ml = train_df[feats_avail + [target_col]].dropna()
+                        if len(train_ml) >= MIN_TRAIN:
+                            test_ml = test_row[feats_avail].dropna()
+                            if len(test_ml) > 0:
+                                scaler = StandardScaler()
+                                X_tr = scaler.fit_transform(train_ml[feats_avail])
+                                X_te = scaler.transform(test_ml[feats_avail])
+                                y_tr = train_ml[target_col]
+                                ml_map = {}
+                                if "ML_Ridge" in model_names:
+                                    ml_map["ML_Ridge"] = Ridge(alpha=1.0)
+                                if "ML_RandomForest" in model_names:
+                                    ml_map["ML_RandomForest"] = RandomForestRegressor(
+                                        n_estimators=100, max_depth=3, random_state=42)
+                                if "ML_GradientBoosting" in model_names:
+                                    ml_map["ML_GradientBoosting"] = GradientBoostingRegressor(
+                                        n_estimators=50, max_depth=2, learning_rate=0.05, random_state=42)
+                                for mname, model in ml_map.items():
+                                    try:
+                                        model.fit(X_tr, y_tr)
+                                        results.append({
+                                            "test_year": test_year, "target": target_col,
+                                            "model": mname, "true": y_true,
+                                            "pred": model.predict(X_te)[0]
+                                        })
+                                    except:
+                                        pass
+
+                        # ARIMA + Holt-Winters on raw target series
+                        ts_train = ts.iloc[:i]
+                        if len(ts_train) >= 3:
+                            if "ARIMA" in model_names:
                                 try:
-                                    model.fit(X_tr, y_tr)
+                                    from pmdarima import auto_arima
+                                    am = auto_arima(ts_train, seasonal=False, stepwise=True,
+                                                    suppress_warnings=True, error_action='ignore',
+                                                    max_p=2, max_q=2, max_d=1)
                                     results.append({
                                         "test_year": test_year, "target": target_col,
-                                        "model": mname, "true": y_true,
-                                        "pred": model.predict(X_te)[0]
+                                        "model": "ARIMA", "true": y_true,
+                                        "pred": am.predict(n_periods=1)[0]
                                     })
                                 except:
                                     pass
+                            if "HoltWinters" in model_names:
+                                try:
+                                    hw = ExponentialSmoothing(ts_train, trend='add', seasonal=None).fit()
+                                    results.append({
+                                        "test_year": test_year, "target": target_col,
+                                        "model": "HoltWinters", "true": y_true,
+                                        "pred": hw.forecast(1).iloc[-1]
+                                    })
+                                except:
+                                    pass
+                    return pd.DataFrame(results)
 
-                    # ARIMA + Holt-Winters on raw target series
-                    ts_train = ts.iloc[:i]
-                    if len(ts_train) >= 3:
-                        if "ARIMA" in model_names:
-                            try:
-                                from pmdarima import auto_arima
-                                am = auto_arima(ts_train, seasonal=False, stepwise=True,
-                                                suppress_warnings=True, error_action='ignore',
-                                                max_p=2, max_q=2, max_d=1)
-                                results.append({
-                                    "test_year": test_year, "target": target_col,
-                                    "model": "ARIMA", "true": y_true,
-                                    "pred": am.predict(n_periods=1)[0]
-                                })
-                            except:
-                                pass
-                        if "HoltWinters" in model_names:
-                            try:
-                                hw = ExponentialSmoothing(ts_train, trend='add', seasonal=None).fit()
-                                results.append({
-                                    "test_year": test_year, "target": target_col,
-                                    "model": "HoltWinters", "true": y_true,
-                                    "pred": hw.forecast(1).iloc[-1]
-                                })
-                            except:
-                                pass
-                return pd.DataFrame(results)
+                all_results_bz = []
+                prog = st.progress(0)
+                for idx, target_col in enumerate(sel_targets_bz):
+                    label = target_col.replace("UNESCO | Completion rate for ","").replace(" (%)","")
+                    st.write(f"Running **{label}**…")
+                    res = run_forecasting_bz(target_col, PRED_FEATS_BZ, df_sorted,
+                                            min_train_bz, models_bz)
+                    if len(res) == 0:
+                        st.warning(f"No valid forecasts for {label}.")
+                    else:
+                        all_results_bz.append(res)
+                    prog.progress((idx + 1) / len(sel_targets_bz))
 
-            all_results_bz = []
-            prog = st.progress(0)
-            for idx, target_col in enumerate(sel_targets_bz):
-                label = target_col.replace("UNESCO | Completion rate for ","").replace(" (%)","")
-                st.write(f"Running **{label}**…")
-                res = run_forecasting_bz(target_col, PRED_FEATS_BZ, df_sorted,
-                                         min_train_bz, models_bz)
-                if len(res) == 0:
-                    st.warning(f"No valid forecasts for {label}.")
-                else:
-                    all_results_bz.append(res)
-                prog.progress((idx + 1) / len(sel_targets_bz))
+                if not all_results_bz:
+                    st.error("No results generated. Try reducing Min training years.")
+                    st.stop()
 
-            if not all_results_bz:
-                st.error("No results generated. Try reducing Min training years.")
-                st.stop()
+                full_bz = pd.concat(all_results_bz, ignore_index=True)
+                full_bz["target_short"] = full_bz["target"].str.replace(
+                    "UNESCO | Completion rate for ","", regex=False).str.replace(" (%)","", regex=False)
 
-            full_bz = pd.concat(all_results_bz, ignore_index=True)
-            # Use short label for display
-            full_bz["target_short"] = full_bz["target"].str.replace(
-                "UNESCO | Completion rate for ","", regex=False).str.replace(" (%)","", regex=False)
+                st.subheader("📊 Results — RMSE")
+                pivot_rmse_bz = full_bz.groupby(["target_short","model"]).apply(
+                    lambda g: pd.Series({"RMSE": np.sqrt(mean_squared_error(g["true"], g["pred"]))})
+                ).reset_index().pivot(index="target_short", columns="model", values="RMSE")
+                st.dataframe(pivot_rmse_bz.round(4), use_container_width=True)
 
-            st.subheader("📊 Results — RMSE")
-            pivot_rmse_bz = full_bz.groupby(["target_short","model"]).apply(
-                lambda g: pd.Series({"RMSE": np.sqrt(mean_squared_error(g["true"], g["pred"]))})
-            ).reset_index().pivot(index="target_short", columns="model", values="RMSE")
-            st.dataframe(pivot_rmse_bz.round(4), use_container_width=True)
+                st.subheader("📊 Results — MAE")
+                pivot_mae_bz = full_bz.groupby(["target_short","model"]).apply(
+                    lambda g: pd.Series({"MAE": mean_absolute_error(g["true"], g["pred"])})
+                ).reset_index().pivot(index="target_short", columns="model", values="MAE")
+                st.dataframe(pivot_mae_bz.round(4), use_container_width=True)
 
-            st.subheader("📊 Results — MAE")
-            pivot_mae_bz = full_bz.groupby(["target_short","model"]).apply(
-                lambda g: pd.Series({"MAE": mean_absolute_error(g["true"], g["pred"])})
-            ).reset_index().pivot(index="target_short", columns="model", values="MAE")
-            st.dataframe(pivot_mae_bz.round(4), use_container_width=True)
+                st.subheader("📊 Results — R²")
+                pivot_r2_bz = full_bz.groupby(["target_short","model"]).apply(
+                    lambda g: pd.Series({"R2": r2_score(g["true"], g["pred"])})
+                ).reset_index().pivot(index="target_short", columns="model", values="R2")
+                st.dataframe(pivot_r2_bz.round(4), use_container_width=True)
 
-            st.subheader("📊 Results — R²")
-            pivot_r2_bz = full_bz.groupby(["target_short","model"]).apply(
-                lambda g: pd.Series({"R2": r2_score(g["true"], g["pred"])})
-            ).reset_index().pivot(index="target_short", columns="model", values="R2")
-            st.dataframe(pivot_r2_bz.round(4), use_container_width=True)
+                comparison_bz = full_bz.groupby(["target_short","model"]).apply(
+                    lambda g: pd.Series({
+                        "RMSE": np.sqrt(mean_squared_error(g["true"], g["pred"])),
+                        "MAE":  mean_absolute_error(g["true"], g["pred"]),
+                        "R2":   r2_score(g["true"], g["pred"])
+                    })
+                ).reset_index()
 
-            comparison_bz = full_bz.groupby(["target_short","model"]).apply(
-                lambda g: pd.Series({
-                    "RMSE": np.sqrt(mean_squared_error(g["true"], g["pred"])),
-                    "MAE":  mean_absolute_error(g["true"], g["pred"]),
-                    "R2":   r2_score(g["true"], g["pred"])
-                })
-            ).reset_index()
+                st.subheader("🏆 Best model per target")
+                col1, col2 = st.columns(2)
+                best_r2_bz  = comparison_bz.loc[comparison_bz.groupby("target_short")["R2"].idxmax(),
+                                                ["target_short","model","R2"]]
+                best_mae_bz = comparison_bz.loc[comparison_bz.groupby("target_short")["MAE"].idxmin(),
+                                                ["target_short","model","MAE"]]
+                col1.write("**By highest R²:**")
+                col1.dataframe(best_r2_bz.round(4), use_container_width=True)
+                col2.write("**By lowest MAE:**")
+                col2.dataframe(best_mae_bz.round(4), use_container_width=True)
 
-            st.subheader("🏆 Best model per target")
-            col1, col2 = st.columns(2)
-            best_r2_bz  = comparison_bz.loc[comparison_bz.groupby("target_short")["R2"].idxmax(),
-                                             ["target_short","model","R2"]]
-            best_mae_bz = comparison_bz.loc[comparison_bz.groupby("target_short")["MAE"].idxmin(),
-                                             ["target_short","model","MAE"]]
-            col1.write("**By highest R²:**")
-            col1.dataframe(best_r2_bz.round(4), use_container_width=True)
-            col2.write("**By lowest MAE:**")
-            col2.dataframe(best_mae_bz.round(4), use_container_width=True)
+                # Actual vs predicted line chart for best model
+                st.subheader("📈 Predicted vs Actual over time")
+                for target_col in sel_targets_bz:
+                    label = target_col.replace("UNESCO | Completion rate for ","").replace(" (%)","")
+                    sub_t = full_bz[full_bz["target"] == target_col]
+                    if sub_t.empty:
+                        continue
+                    best_m = sub_t.groupby("model").apply(
+                        lambda g: r2_score(g["true"], g["pred"])
+                    ).idxmax()
+                    sub_best = sub_t[sub_t["model"] == best_m].sort_values("test_year")
+                    fig_line = go.Figure()
+                    fig_line.add_trace(go.Scatter(
+                        x=sub_best["test_year"], y=sub_best["true"],
+                        mode="lines+markers", name="Actual", line_color=PALETTE[0]))
+                    fig_line.add_trace(go.Scatter(
+                        x=sub_best["test_year"], y=sub_best["pred"],
+                        mode="lines+markers", name=f"Predicted ({best_m})",
+                        line=dict(color=PALETTE[2], dash="dash")))
+                    fig_line.update_layout(
+                        title=f"{label} — Actual vs Predicted ({best_m})",
+                        template="plotly_white", height=350,
+                        xaxis_title="Year", yaxis_title="Completion Rate"
+                    )
+                    st.plotly_chart(fig_line, use_container_width=True)
 
-            # Actual vs predicted line chart for best model
-            st.subheader("📈 Predicted vs Actual over time")
-            for target_col in sel_targets_bz:
-                label = target_col.replace("UNESCO | Completion rate for ","").replace(" (%)","")
-                sub_t = full_bz[full_bz["target"] == target_col]
-                if sub_t.empty:
-                    continue
-                best_m = sub_t.groupby("model").apply(
-                    lambda g: r2_score(g["true"], g["pred"])
-                ).idxmax()
-                sub_best = sub_t[sub_t["model"] == best_m].sort_values("test_year")
-                fig_line = go.Figure()
-                fig_line.add_trace(go.Scatter(
-                    x=sub_best["test_year"], y=sub_best["true"],
-                    mode="lines+markers", name="Actual", line_color=PALETTE[0]))
-                fig_line.add_trace(go.Scatter(
-                    x=sub_best["test_year"], y=sub_best["pred"],
-                    mode="lines+markers", name=f"Predicted ({best_m})",
-                    line=dict(color=PALETTE[2], dash="dash")))
-                fig_line.update_layout(
-                    title=f"{label} — Actual vs Predicted ({best_m})",
-                    template="plotly_white", height=350,
-                    xaxis_title="Year", yaxis_title="Completion Rate"
+                # Bar comparison
+                fig_bar_bz = px.bar(
+                    comparison_bz.melt(id_vars=["target_short","model"], value_vars=["RMSE","MAE"]),
+                    x="model", y="value", color="target_short", barmode="group",
+                    facet_col="variable", template="plotly_white", height=420,
+                    title="Model Comparison — RMSE & MAE by Target",
+                    color_discrete_sequence=PALETTE
                 )
-                st.plotly_chart(fig_line, use_container_width=True)
+                fig_bar_bz.update_xaxes(tickangle=30)
+                st.plotly_chart(fig_bar_bz, use_container_width=True)
 
-            # Bar comparison
-            fig_bar_bz = px.bar(
-                comparison_bz.melt(id_vars=["target_short","model"], value_vars=["RMSE","MAE"]),
-                x="model", y="value", color="target_short", barmode="group",
-                facet_col="variable", template="plotly_white", height=420,
-                title="Model Comparison — RMSE & MAE by Target",
-                color_discrete_sequence=PALETTE
-            )
-            fig_bar_bz.update_xaxes(tickangle=30)
-            st.plotly_chart(fig_bar_bz, use_container_width=True)
-
-            st.session_state["bz_cv_results"] = {
-                "full_results": full_bz,
-                "comparison": comparison_bz,
-                "pivot_rmse": pivot_rmse_bz,
-                "pivot_mae": pivot_mae_bz,
-                "pivot_r2": pivot_r2_bz,
-            }
-            st.success("✅ Unified forecasting complete.")
+                st.session_state["bz_cv_results"] = {
+                    "full_results": full_bz,
+                    "comparison": comparison_bz,
+                    "pivot_rmse": pivot_rmse_bz,
+                    "pivot_mae": pivot_mae_bz,
+                    "pivot_r2": pivot_r2_bz,
+                }
+                st.success("✅ Unified forecasting complete.")
 
         elif st.session_state.get("bz_cv_results") is not None:
             st.info("Forecasting already run. Re-run to update.")
