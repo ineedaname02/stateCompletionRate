@@ -202,10 +202,14 @@ elif page == "🧹 2 · Cleaning & Master":
                     (c for c in df_enrolment.columns
                      if c not in ["state","district","stage","sex","date","year","type"]
                      and df_enrolment[c].dtype in ["int64","float64"]), None)
-                enrol_st = df_enrolment[
-                    (df_enrolment.get("district", pd.Series(["All Districts"]*len(df_enrolment))) == "All Districts") &
-                    (df_enrolment["state"].isin(STATES_16)) &
-                    (df_enrolment["stage"].isin(["primary","secondary"]))
+                if "district" in df_enrolment.columns:
+                    enrol_st = df_enrolment[df_enrolment["district"] == "All Districts"].copy()
+                else:
+                    enrol_st = df_enrolment.copy()
+
+                enrol_st = enrol_st[
+                    (enrol_st["state"].isin(STATES_16)) &
+                    (enrol_st["stage"].isin(["primary", "secondary"]))
                 ].copy()
                 if "sex" in enrol_st.columns:
                     enrol_st = enrol_st[enrol_st["sex"].isin(["both","Both","overall","Overall"])]
@@ -298,6 +302,23 @@ elif page == "🧹 2 · Cleaning & Master":
 
                 master = master.sort_values(["state","year"]).reset_index(drop=True)
 
+                # ── Drop missing ───────────────────────────────────────────
+                DISTRICT_COLS = [c for c in [
+                    "teachers_primary", "teachers_secondary",
+                    "schools_primary", "schools_secondary",
+                    "enrolment_primary", "enrolment_secondary"
+                ] if c in master.columns]
+
+                if drop_missing and DISTRICT_COLS:
+                    before = len(master)
+                    missing_rows = master.loc[
+                        master[DISTRICT_COLS].isnull().any(axis=1), ["state", "year"]
+                    ].drop_duplicates()
+                    master = master.merge(missing_rows, on=["state","year"], how="left", indicator=True)
+                    master = master[master["_merge"] == "left_only"].drop(columns=["_merge"])
+                    master = master.sort_values(["state","year"]).reset_index(drop=True)
+                    st.info(f"Dropped {before - len(master)} rows with missing values.")
+
                 # ── Interpolate sparse columns ─────────────────────────────
                 SPARSE = [c for c in master.columns
                           if c not in ["state","year"] and master[c].isna().sum() > 0]
@@ -321,14 +342,7 @@ elif page == "🧹 2 · Cleaning & Master":
                 if "income_median" in master and "avg_hh_size" in master:
                     master["urban_pressure_proxy"] = master["income_median"] / (master["avg_hh_size"] + 1e-6)
 
-                # ── Drop missing ───────────────────────────────────────────
-                if drop_missing:
-                    before = len(master)
-                    missing_rows = master.loc[master.isnull().any(axis=1), ["state","year"]].drop_duplicates()
-                    master = master.merge(missing_rows, on=["state","year"], how="left", indicator=True)
-                    master = master[master["_merge"] == "left_only"].drop(columns=["_merge"])
-                    master = master.sort_values(["state","year"]).reset_index(drop=True)
-                    st.info(f"Dropped {before - len(master)} rows with missing values.")
+
 
                 st.session_state["master"] = master
 
