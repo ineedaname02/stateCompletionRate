@@ -1,5 +1,4 @@
 """
-🌎 Education Analysis Dashboard
 Malaysia (State-level) + Brazil (National) — COS40007 Theme 3: Smart Government
 """
 
@@ -13,8 +12,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 st.set_page_config(
-    page_title="🌎 Education Analysis Dashboard",
-    page_icon="🏫",
+    page_title="Education Analysis Dashboard",
     layout="wide",
     initial_sidebar_state="expanded",
 )
